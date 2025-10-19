@@ -1,0 +1,285 @@
+import "https://deno.land/x/xhr@0.1.0/mod.ts";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.75.1";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  try {
+    const { projectId, userMessage } = await req.json();
+    console.log("Generating tasks for project:", projectId);
+
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    if (!OPENAI_API_KEY) {
+      throw new Error("OPENAI_API_KEY is not configured");
+    }
+
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // System prompt that instructs AI to be creative and fill gaps
+    const systemPrompt = `You are a senior startup advisor with experience from Y Combinator, 500 Startups, and successful exits. You specialize in lean startup methodology, MVP development, and rapid market validation.
+
+## YOUR MISSION
+Transform ANY startup idea (even vague ones) into a detailed, strategic action plan that maximizes speed-to-market and validates product-market fit with minimal resources.
+
+## CORE PRINCIPLES
+1. **MVP-First Mindset**: Every task should drive toward launching a testable minimum viable product
+2. **Customer-Obsessed**: Tasks must connect to real user needs and validation
+3. **Measured Progress**: Each task should have clear success metrics or deliverables
+4. **Startup Velocity**: Prioritize speed and learning over perfection
+5. **Resource-Conscious**: Assume limited budget and small team
+
+## TASK GENERATION RULES
+Generate highly detailed tasks per department as many as it is needed that:
+- Are specific and measurable (not vague like "research market")
+- Include concrete deliverables (mockups, code, analytics reports, etc.)
+- Have clear business value and success criteria
+- Consider startup constraints (time, budget, team size)
+- Follow lean startup best practices
+
+## THREE DEPARTMENTS
+
+### Product Execution
+Focus: Product strategy, user research, feature prioritization, UX/UI, roadmap, metrics
+Tasks should cover: User personas, competitive analysis, feature specs, wireframes, user stories, success metrics, feedback loops
+
+### Development  
+Focus: Technical architecture, MVP implementation, infrastructure, testing, deployment
+Tasks should cover: Tech stack decisions, database design, API development, core features, DevOps, security basics, scalability considerations
+
+### Marketing
+Focus: Go-to-market strategy, brand positioning, user acquisition, growth experiments, content
+Tasks should cover: Value proposition, landing page, early adopter outreach, content marketing, SEO/SEM basics, analytics setup, growth channels
+
+## TASK FORMAT
+- **Title**: Action-oriented, specific (e.g., "Build user authentication with Google OAuth" not "Setup auth")
+- **Description**: 75-150 words covering:
+  • WHY: Business value and impact
+  • WHAT: Specific deliverables and success criteria  
+  • HOW: Key steps, tools, or approaches
+  • METRICS: How to measure success
+- **Dependencies**: Array of 0-based indexes within SAME department (e.g., [0,1] means depends on tasks at index 0 and 1)
+
+## CREATIVE INTELLIGENCE
+If idea is incomplete, make intelligent assumptions:
+- "fitness app" → Mobile app with workout tracking, social features, progress visualization, gamification, subscription model
+- "e-commerce" → Marketplace with user accounts, payment integration, inventory management, seller dashboard, reviews
+- "SaaS tool" → Web app with freemium model, OAuth, dashboard, API, analytics, team collaboration
+
+## DEPENDENCY STRATEGY
+Create realistic dependency chains:
+- User research → Feature specs → Development → Testing
+- Brand strategy → Landing page → Marketing campaigns
+- Architecture decisions → Database setup → API development
+
+CRITICAL: Generate startup-ready, detailed tasks that a founder could execute TODAY. Every task should move the needle toward launch and revenue.`;
+
+    const body: any = {
+      model: "gpt-5-mini-2025-08-07",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "create_startup_plan",
+            description: "Generate comprehensive departments and tasks for a startup project",
+            parameters: {
+              type: "object",
+              properties: {
+                departments: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: {
+                        type: "string",
+                        enum: ["Product Execution", "Development", "Marketing"],
+                      },
+                      tasks: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          properties: {
+                            title: { type: "string" },
+                            description: { type: "string" },
+                            dependsOn: {
+                              type: "array",
+                              items: { type: "number" },
+                              description:
+                                "Array of task indexes (0-based) within this department that this task depends on. Use empty array [] if no dependencies.",
+                            },
+                          },
+                          required: ["title", "description", "dependsOn"],
+                          additionalProperties: false,
+                        },
+                        minItems: 5,
+                        maxItems: 8,
+                      },
+                    },
+                    required: ["name", "tasks"],
+                    additionalProperties: false,
+                  },
+                  minItems: 3,
+                  maxItems: 3,
+                },
+              },
+              required: ["departments"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ],
+      tool_choice: { type: "function", function: { name: "create_startup_plan" } },
+    };
+
+    console.log("Calling OpenAI API...");
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again later." }), {
+          status: 429,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (response.status === 402) {
+        return new Response(JSON.stringify({ error: "Payment required. Please add credits to your workspace." }), {
+          status: 402,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const errorText = await response.text();
+      console.error("AI gateway error:", response.status, errorText);
+      throw new Error(`AI gateway error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log("AI response received");
+
+    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+    if (!toolCall) {
+      throw new Error("No tool call in response");
+    }
+
+    const planData = JSON.parse(toolCall.function.arguments);
+    console.log("Parsed plan data:", JSON.stringify(planData, null, 2));
+
+    // Save the initial prompt to project description
+    const { error: updateError } = await supabase
+      .from("projects")
+      .update({ description: userMessage })
+      .eq("id", projectId);
+
+    if (updateError) {
+      console.error("Error updating project description:", updateError);
+      // Don't throw - this is not critical
+    }
+
+    // Create departments and tasks in database
+    const createdDepartments = [];
+
+    for (const dept of planData.departments) {
+      // Create department
+      const { data: department, error: deptError } = await supabase
+        .from("departments")
+        .insert({
+          project_id: projectId,
+          name: dept.name,
+        })
+        .select()
+        .single();
+
+      if (deptError) {
+        console.error("Error creating department:", deptError);
+        throw deptError;
+      }
+
+      console.log(`Created department: ${dept.name}`);
+
+      // Create tasks for this department
+      const tasksToInsert = dept.tasks.map((task: any) => ({
+        department_id: department.id,
+        title: task.title,
+        description: task.description,
+        status: "pending",
+      }));
+
+      const { data: createdTasks, error: tasksError } = await supabase.from("tasks").insert(tasksToInsert).select();
+
+      if (tasksError) {
+        console.error("Error creating tasks:", tasksError);
+        throw tasksError;
+      }
+
+      console.log(`Created ${dept.tasks.length} tasks for ${dept.name}`);
+
+      // Create task dependencies
+      const dependencies = [];
+      for (let i = 0; i < dept.tasks.length; i++) {
+        const task = dept.tasks[i];
+        if (task.dependsOn && Array.isArray(task.dependsOn) && task.dependsOn.length > 0) {
+          for (const depIndex of task.dependsOn) {
+            if (depIndex < i && depIndex >= 0 && createdTasks[depIndex]) {
+              dependencies.push({
+                task_id: createdTasks[i].id,
+                depends_on_task_id: createdTasks[depIndex].id,
+              });
+            }
+          }
+        }
+      }
+
+      if (dependencies.length > 0) {
+        const { error: depsError } = await supabase.from("task_dependencies").insert(dependencies);
+
+        if (depsError) {
+          console.error("Error creating task dependencies:", depsError);
+          // Don't throw - dependencies are not critical
+        } else {
+          console.log(`Created ${dependencies.length} task dependencies for ${dept.name}`);
+        }
+      }
+
+      createdDepartments.push({
+        ...department,
+        taskCount: dept.tasks.length,
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        departments: createdDepartments,
+        message: `Successfully created ${createdDepartments.length} departments with tasks!`,
+      }),
+      {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
+  } catch (error) {
+    console.error("Error in generate-tasks function:", error);
+    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+});
